@@ -34,9 +34,8 @@ def get_prayer_times():
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     day_pattern = re.compile(r"^\d{1,2}\s+\w{3}")
 
-    # Each day's row now has up to 14 numeric columns: 6 for beginning + 6 for jama'ah
     prayer_data = []
-    last_jamaah = ["N/A"] * 6
+    last_jamaah = ["N/A"] * 5  # only 5 Jama'ah slots (Fajr, Dhuhr, Asr, Maghrib, Isha)
 
     for line in lines:
         if not day_pattern.match(line):
@@ -48,40 +47,50 @@ def get_prayer_times():
 
         day_num = int(parts[0])
 
-        # Example: 4 Tue 5.18 6.59 11.48 2.38 4.30 6.00 6.15 - 1.00 3.15 4.33 7.30
-        numeric_parts = [p for p in parts[2:] if re.match(r"^\d|\-", p)]
+        # Extract numeric-like parts (e.g. 5.18, 6:59, -, etc.)
+        numeric_parts = [p for p in parts[2:] if re.match(r"^(\d{1,2}[:.]\d{1,2}|-)$", p)]
 
-        # first 6 = beginning, remaining = jama'ah (some may be missing)
+        # First 6 = beginning times, next up to 5 = Jama’ah
         beginning_times = numeric_parts[:6]
         jamaah_times_raw = numeric_parts[6:]
 
-        # fill missing jama'ah times from last known
-        jamaah_times = []
-        for i in range(6):
-            if i < len(jamaah_times_raw):
-                val = jamaah_times_raw[i]
-                if val == '-' or val.upper() == 'N/A':
-                    val = last_jamaah[i]
-                else:
-                    last_jamaah[i] = val
-            else:
+        # Ensure we have exactly 5 Jama'ah entries (pad missing with '-')
+        while len(jamaah_times_raw) < 5:
+            jamaah_times_raw.append("-")
+
+        # Replace '-' with previous known time
+        jamaah_times_filled = []
+        for i in range(5):
+            val = jamaah_times_raw[i]
+            if val == '-' or val.upper() == 'N/A':
                 val = last_jamaah[i]
-            jamaah_times.append(val)
+            else:
+                last_jamaah[i] = val
+            jamaah_times_filled.append(val)
 
         prayer_data.append({
             "day": day_num,
             "begin": beginning_times,
-            "jamaah": jamaah_times
+            "jamaah": jamaah_times_filled
         })
 
     today_data = next((d for d in prayer_data if d["day"] == day), None)
     if not today_data:
         raise ValueError(f"Could not find timetable entry for day {day}")
 
-    # Sunrise always has no Jama'ah
-    today_data["jamaah"][1] = "N/A"
+    # Now align 5 Jama’ah times to 6 prayers (Sunrise has none)
+    prayers = ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"]
+    aligned_jamaah = [
+        today_data["jamaah"][0],  # Fajr
+        "N/A",                    # Sunrise
+        today_data["jamaah"][1],  # Dhuhr
+        today_data["jamaah"][2],  # Asr
+        today_data["jamaah"][3],  # Maghrib
+        today_data["jamaah"][4],  # Isha
+    ]
 
-    return today_data["begin"], today_data["jamaah"]
+    return today_data["begin"], aligned_jamaah
+
 
 @app.route('/')
 def index():
