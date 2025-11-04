@@ -3,7 +3,7 @@ import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 import datetime
-import os
+import io
 
 app = Flask(__name__)
 
@@ -17,39 +17,56 @@ def get_pdf_url():
 def get_prayer_times():
     pdf_url = get_pdf_url()
     response = requests.get(pdf_url)
-
-    with open('prayer_times.pdf', 'wb') as f:
-        f.write(response.content)
+    pdf_file = io.BytesIO(response.content)
 
     today = datetime.datetime.now()
-    day = str(today.day)
+    day = today.day
 
-    beginning_times = ['-'] * 6
-    jamaah_times = ['N/A'] * 6
-    previous_jamaah = [""] * 6
-
-    with pdfplumber.open("prayer_times.pdf") as pdf:
+    with pdfplumber.open(pdf_file) as pdf:
         page = pdf.pages[0]
         table = page.extract_table()
 
-        for row in table:
-            if row and row[0] and day in row[0].strip():
-                # Extract columns safely
-                raw = [r.strip() if r else "" for r in row]
+    if not table:
+        raise ValueError("Could not extract table from PDF")
 
-                # Beginning times: [Fajr, Sunrise, Dhuhr, Asr, Maghrib, Isha]
-                beginning_times = raw[2:8]
+    rows = [r for r in table if r and any(r)]
+    beginning_times = None
+    jamaah_times = None
 
-                # Jama'ah times start at column 8
-                for i, jt in enumerate(raw[8:14]):
-                    if i == 1:
-                        jamaah_times[i] = "N/A"  # Sunrise
-                    elif jt == '"':
-                        jamaah_times[i] = previous_jamaah[i] or "N/A"
+    # Track previous day's jamaah times to fill in for '"'
+    previous_jamaah_times = ['N/A'] * 6
+
+    for i, row in enumerate(rows):
+        if str(day) in (row[0] or ''):
+            beginning_times = row[2:8]
+            if i + 1 < len(rows):
+                jamaah_row = rows[i + 1]
+                jamaah_times = []
+                for j, val in enumerate(jamaah_row[1:7]):
+                    if val.strip() == '"':
+                        jamaah_times.append(previous_jamaah_times[j])
+                    elif val.strip() in ('', '-'):
+                        jamaah_times.append('N/A')
                     else:
-                        jamaah_times[i] = jt
-                        previous_jamaah[i] = jt
-                break
+                        jamaah_times.append(val.strip())
+                        previous_jamaah_times[j] = val.strip()
+            break
+        elif i + 1 < len(rows):  # Track previous jamaah row values
+            jamaah_row = rows[i + 1]
+            for j, val in enumerate(jamaah_row[1:7]):
+                if val and val.strip() != '"':
+                    previous_jamaah_times[j] = val.strip()
+
+    if not beginning_times:
+        raise ValueError(f"Could not find today's prayer times for day {day} in PDF")
+
+    # Clean up
+    def clean_time(v):
+        return v.strip() if v and v.strip() not in ('', '-') else 'N/A'
+
+    beginning_times = [clean_time(v) for v in beginning_times]
+    jamaah_times = jamaah_times if jamaah_times else ['N/A'] * 6
+    jamaah_times[1] = 'N/A'  # Sunrise has no Jama'ah
 
     return beginning_times, jamaah_times
 
@@ -58,10 +75,12 @@ def index():
     beginning_times, jamaah_times = get_prayer_times()
     prayers = ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"]
 
-    html = """
+    html_content = """
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Prayer Times</title>
         <style>
             body {
@@ -108,8 +127,9 @@ def index():
     </html>
     """
 
-    return render_template_string(html, prayer_data=zip(prayers, beginning_times, jamaah_times))
+    return render_template_string(html_content, prayer_data=zip(prayers, beginning_times, jamaah_times))
 
 if __name__ == '__main__':
-    from waitress import serve
-    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
