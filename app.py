@@ -3,8 +3,8 @@ import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 import datetime
-import io
 import os
+import io
 
 app = Flask(__name__)
 
@@ -12,101 +12,100 @@ def get_pdf_url():
     url = 'https://quwwatulislam.org/prayertimes/'
     response = requests.get(url)
     soup = BeautifulSoup(response.text, 'html.parser')
-    pdf_url = soup.select_one('.post-content a').get('href')
-    return pdf_url
+    pdf_link = soup.select_one('.post-content a')
+    return pdf_link.get('href') if pdf_link else None
 
 def get_prayer_times():
     pdf_url = get_pdf_url()
+    if not pdf_url:
+        raise ValueError("Could not find PDF link on the site.")
+
     response = requests.get(pdf_url)
-    pdf_file = io.BytesIO(response.content)
+    if response.status_code != 200:
+        raise ValueError("Failed to download the timetable PDF.")
+
+    # Load PDF into memory
+    with pdfplumber.open(io.BytesIO(response.content)) as pdf:
+        page = pdf.pages[0]
+        table = page.extract_table()
 
     today = datetime.datetime.now()
     day = today.day
 
-    with pdfplumber.open(pdf_file) as pdf:
-        page = pdf.pages[0]
-        table = page.extract_table()
+    beginning_times = []
+    jamaah_times = []
+    previous_jamaah = ['N/A'] * 6  # To track previous values
 
-    if not table:
-        raise ValueError("Could not extract table from PDF")
+    for row in table:
+        if row and row[0] and str(day) in str(row[0]):
+            # Extract relevant cells: [0]=Day, [1]=Fajr, ..., [6]=Isha
+            beginning_times = row[1:7]
 
-    rows = [r for r in table if r and any(r)]
-    beginning_times = None
-    jamaah_times = None
-    previous_jamaah_times = ['N/A'] * 6
-
-    for i, row in enumerate(rows):
-        if str(day) in (row[0] or ''):
-            beginning_times = row[2:8]
-            if i + 1 < len(rows):
-                jamaah_row = rows[i + 1]
-                jamaah_times = []
-                for j, val in enumerate(jamaah_row[1:7]):
-                    if val.strip() == '"':
-                        jamaah_times.append(previous_jamaah_times[j])
-                    elif val.strip() in ('', '-'):
-                        jamaah_times.append('N/A')
+            # Jama'ah times usually follow in [7:] but some cells may be missing or contain '"'
+            raw_jamaah = row[7:]
+            for i in range(6):
+                if i == 1:
+                    jamaah_times.append("N/A")  # Sunrise has no Jama'ah
+                elif i < len(raw_jamaah):
+                    time = raw_jamaah[i]
+                    if time == '"' or not time:
+                        jamaah_times.append(previous_jamaah[i])
                     else:
-                        jamaah_times.append(val.strip())
-                        previous_jamaah_times[j] = val.strip()
+                        jamaah_times.append(time)
+                        previous_jamaah[i] = time
+                else:
+                    jamaah_times.append(previous_jamaah[i])
             break
-        elif i + 1 < len(rows):
-            jamaah_row = rows[i + 1]
-            for j, val in enumerate(jamaah_row[1:7]):
-                if val and val.strip() != '"':
-                    previous_jamaah_times[j] = val.strip()
 
+    # Handle missing data
     if not beginning_times:
-        raise ValueError(f"Could not find today's prayer times for day {day} in PDF")
-
-    def clean_time(v):
-        return v.strip() if v and v.strip() not in ('', '-') else 'N/A'
-
-    beginning_times = [clean_time(v) for v in beginning_times]
-    jamaah_times = jamaah_times if jamaah_times else ['N/A'] * 6
-    jamaah_times[1] = 'N/A'  # Sunrise has no Jama'ah time
+        beginning_times = ["-"] * 6
+    if not jamaah_times:
+        jamaah_times = ["N/A"] * 6
+    elif len(jamaah_times) < 6:
+        jamaah_times += ["N/A"] * (6 - len(jamaah_times))
 
     return beginning_times, jamaah_times
 
 @app.route('/')
 def index():
-    beginning_times, jamaah_times = get_prayer_times()
+    try:
+        beginning_times, jamaah_times = get_prayer_times()
+    except Exception as e:
+        return f"<h1>Error fetching prayer times</h1><pre>{str(e)}</pre>"
+
     prayers = ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"]
 
     html_content = """
     <!DOCTYPE html>
-    <html lang="en">
+    <html>
     <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Prayer Times</title>
+        <style>
+            body { font-family: Arial; padding: 20px; }
+            h1 { font-size: 2em; }
+            table { border-collapse: collapse; width: 50%; }
+            th, td { border: 1px solid #000; padding: 8px; text-align: center; }
+            th { background-color: #eee; }
+        </style>
     </head>
     <body>
         <h1>Today's Prayer Times</h1>
-        <table border="1">
-            <thead>
-                <tr>
-                    <th>Prayer</th>
-                    <th>Beginning Time</th>
-                    <th>Jama'ah Time</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for prayer, begin, jamaah in prayer_data %}
-                <tr>
-                    <td>{{ prayer }}</td>
-                    <td>{{ begin }}</td>
-                    <td>{{ jamaah }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
+        <table>
+            <tr><th>Prayer</th><th>Beginning Time</th><th>Jama'ah Time</th></tr>
+            {% for prayer, begin, jamaah in prayer_data %}
+            <tr>
+                <td>{{ prayer }}</td>
+                <td>{{ begin }}</td>
+                <td>{{ jamaah }}</td>
+            </tr>
+            {% endfor %}
         </table>
     </body>
     </html>
     """
-
     return render_template_string(html_content, prayer_data=zip(prayers, beginning_times, jamaah_times))
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
