@@ -3,109 +3,114 @@ import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 import datetime
-import os
-import io
 
 app = Flask(__name__)
 
 def get_pdf_url():
+    # Get the webpage content
     url = 'https://quwwatulislam.org/prayertimes/'
     response = requests.get(url)
     soup = BeautifulSoup(response.text, 'html.parser')
-    pdf_link = soup.select_one('.post-content a')
-    return pdf_link.get('href') if pdf_link else None
+
+    # Find the PDF link using the selector
+    pdf_url = soup.select_one('.post-content a').get('href')
+    return pdf_url
 
 def get_prayer_times():
+    import io
+
+    # Get PDF from URL
     pdf_url = get_pdf_url()
-    if not pdf_url:
-        raise ValueError("Could not find PDF link on the site.")
-
     response = requests.get(pdf_url)
-    if response.status_code != 200:
-        raise ValueError("Failed to download the timetable PDF.")
+    pdf_file = io.BytesIO(response.content)
 
-    # Load PDF into memory
-    with pdfplumber.open(io.BytesIO(response.content)) as pdf:
-        page = pdf.pages[0]
-        table = page.extract_table()
-
+    # Get today's date
     today = datetime.datetime.now()
     day = today.day
 
-    beginning_times = []
-    jamaah_times = []
-    previous_jamaah = ['N/A'] * 6  # To track previous values
+    with pdfplumber.open(pdf_file) as pdf:
+        page = pdf.pages[0]
+        text = page.extract_text()
 
-    for row in table:
-        if row and row[0] and str(day) in str(row[0]):
-            # Extract relevant cells: [0]=Day, [1]=Fajr, ..., [6]=Isha
-            beginning_times = row[1:7]
+    lines = text.split('\n')
+    beginning_times_line = None
+    jamaah_times_line = None
 
-            # Jama'ah times usually follow in [7:] but some cells may be missing or contain '"'
-            raw_jamaah = row[7:]
-            for i in range(6):
-                if i == 1:
-                    jamaah_times.append("N/A")  # Sunrise has no Jama'ah
-                elif i < len(raw_jamaah):
-                    time = raw_jamaah[i]
-                    if time == '"' or not time:
-                        jamaah_times.append(previous_jamaah[i])
-                    else:
-                        jamaah_times.append(time)
-                        previous_jamaah[i] = time
-                else:
-                    jamaah_times.append(previous_jamaah[i])
+    for i, line in enumerate(lines):
+        if line.strip().startswith(str(day) + " "):  # e.g. "4 Mon"
+            beginning_times_line = line
+            if i + 1 < len(lines):
+                jamaah_times_line = lines[i + 1]
             break
 
-    # Handle missing data
-    if not beginning_times:
-        beginning_times = ["-"] * 6
-    if not jamaah_times:
-        jamaah_times = ["N/A"] * 6
-    elif len(jamaah_times) < 6:
-        jamaah_times += ["N/A"] * (6 - len(jamaah_times))
+    if not beginning_times_line:
+        raise ValueError("Could not find today's line in the timetable.")
+
+    # Extract beginning times
+    parts = beginning_times_line.strip().split()
+    beginning_times = parts[2:8]  # Skip day and weekday
+
+    # Extract jamaah times
+    jamaah_parts = jamaah_times_line.strip().split() if jamaah_times_line else []
+    jamaah_times = []
+
+    for i in range(6):
+        if i < len(jamaah_parts):
+            t = jamaah_parts[i]
+            jamaah_times.append(t if t != '-' else 'N/A')
+        else:
+            jamaah_times.append('N/A')
+
+    # Insert 'N/A' for Sunrise Jama'ah
+    jamaah_times[1] = 'N/A'
 
     return beginning_times, jamaah_times
 
+
 @app.route('/')
 def index():
-    try:
-        beginning_times, jamaah_times = get_prayer_times()
-    except Exception as e:
-        return f"<h1>Error fetching prayer times</h1><pre>{str(e)}</pre>"
-
+    # Extract prayer times
+    beginning_times, jamaah_times = get_prayer_times()
+    
+    # Define the prayer names
     prayers = ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"]
 
+    # Render the webpage with prayer times
     html_content = """
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Prayer Times</title>
-        <style>
-            body { font-family: Arial; padding: 20px; }
-            h1 { font-size: 2em; }
-            table { border-collapse: collapse; width: 50%; }
-            th, td { border: 1px solid #000; padding: 8px; text-align: center; }
-            th { background-color: #eee; }
-        </style>
     </head>
     <body>
         <h1>Today's Prayer Times</h1>
-        <table>
-            <tr><th>Prayer</th><th>Beginning Time</th><th>Jama'ah Time</th></tr>
-            {% for prayer, begin, jamaah in prayer_data %}
-            <tr>
-                <td>{{ prayer }}</td>
-                <td>{{ begin }}</td>
-                <td>{{ jamaah }}</td>
-            </tr>
-            {% endfor %}
+        <table border="1">
+            <thead>
+                <tr>
+                    <th>Prayer</th>
+                    <th>Beginning Time</th>
+                    <th>Jama'ah Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for prayer, begin, jamaah in prayer_data %}
+                <tr>
+                    <td>{{ prayer }}</td>
+                    <td>{{ begin }}</td>
+                    <td>{{ jamaah }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
         </table>
     </body>
     </html>
     """
+
     return render_template_string(html_content, prayer_data=zip(prayers, beginning_times, jamaah_times))
 
 if __name__ == '__main__':
-    from waitress import serve
-    serve(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
