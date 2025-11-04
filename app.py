@@ -18,6 +18,7 @@ def get_pdf_url():
 
 def get_prayer_times():
     import io
+    import re
 
     # Get PDF from URL
     pdf_url = get_pdf_url()
@@ -32,40 +33,57 @@ def get_prayer_times():
         page = pdf.pages[0]
         text = page.extract_text()
 
-    lines = text.split('\n')
-    beginning_times_line = None
-    jamaah_times_line = None
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
 
-    for i, line in enumerate(lines):
-        if line.strip().startswith(str(day) + " "):  # e.g. "4 Mon"
-            beginning_times_line = line
+    # We'll store parsed prayer data here
+    prayer_data = []
+    last_jamaah = ["N/A"] * 6  # To fill "-" with last known time
+
+    # Regex to detect a day row (starts with date + weekday)
+    day_pattern = re.compile(r"^\d{1,2}\s+\w{3}")
+
+    # Loop through lines and pair Beginning/Jama'ah rows
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        if day_pattern.match(line):
+            parts = line.split()
+            if len(parts) < 8:
+                i += 1
+                continue  # skip incomplete rows
+
+            day_num = int(parts[0])
+            beginning_times = parts[2:8]  # Skip date + weekday
+
+            # Assume next line = Jama’ah times (sometimes may not exist)
+            jamaah_times = ["N/A"] * 6
             if i + 1 < len(lines):
-                jamaah_times_line = lines[i + 1]
-            break
+                next_line = lines[i + 1]
+                jamaah_parts = next_line.split()
+                if len(jamaah_parts) >= 6 and not day_pattern.match(next_line):
+                    for j in range(6):
+                        val = jamaah_parts[j] if j < len(jamaah_parts) else "-"
+                        if val == "-" or val.upper() == "N/A":
+                            val = last_jamaah[j]  # fill with last known
+                        else:
+                            last_jamaah[j] = val
+                        jamaah_times[j] = val
 
-    if not beginning_times_line:
-        raise ValueError("Could not find today's line in the timetable.")
+            prayer_data.append({
+                "day": day_num,
+                "begin": beginning_times,
+                "jamaah": jamaah_times
+            })
 
-    # Extract beginning times
-    parts = beginning_times_line.strip().split()
-    beginning_times = parts[2:8]  # Skip day and weekday
+        i += 1
 
-    # Extract jamaah times
-    jamaah_parts = jamaah_times_line.strip().split() if jamaah_times_line else []
-    jamaah_times = []
+    # Find today's row
+    today_data = next((d for d in prayer_data if d["day"] == day), None)
+    if not today_data:
+        raise ValueError(f"Could not find timetable entry for day {day}")
 
-    for i in range(6):
-        if i < len(jamaah_parts):
-            t = jamaah_parts[i]
-            jamaah_times.append(t if t != '-' else 'N/A')
-        else:
-            jamaah_times.append('N/A')
-
-    # Insert 'N/A' for Sunrise Jama'ah
-    jamaah_times[1] = 'N/A'
-
-    return beginning_times, jamaah_times
-
+    return today_data["begin"], today_data["jamaah"]
 
 @app.route('/')
 def index():
