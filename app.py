@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import datetime
 import io
+import os
 
 app = Flask(__name__)
 
@@ -32,8 +33,6 @@ def get_prayer_times():
     rows = [r for r in table if r and any(r)]
     beginning_times = None
     jamaah_times = None
-
-    # Track previous day's jamaah times to fill in for '"'
     previous_jamaah_times = ['N/A'] * 6
 
     for i, row in enumerate(rows):
@@ -51,7 +50,7 @@ def get_prayer_times():
                         jamaah_times.append(val.strip())
                         previous_jamaah_times[j] = val.strip()
             break
-        elif i + 1 < len(rows):  # Track previous jamaah row values
+        elif i + 1 < len(rows):
             jamaah_row = rows[i + 1]
             for j, val in enumerate(jamaah_row[1:7]):
                 if val and val.strip() != '"':
@@ -60,13 +59,12 @@ def get_prayer_times():
     if not beginning_times:
         raise ValueError(f"Could not find today's prayer times for day {day} in PDF")
 
-    # Clean up
     def clean_time(v):
         return v.strip() if v and v.strip() not in ('', '-') else 'N/A'
 
     beginning_times = [clean_time(v) for v in beginning_times]
     jamaah_times = jamaah_times if jamaah_times else ['N/A'] * 6
-    jamaah_times[1] = 'N/A'  # Sunrise has no Jama'ah
+    jamaah_times[1] = 'N/A'  # Sunrise has no Jama'ah time
 
     return beginning_times, jamaah_times
 
@@ -82,30 +80,10 @@ def index():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Prayer Times</title>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-            }
-            h1 {
-                font-size: 2em;
-            }
-            table {
-                border-collapse: collapse;
-                width: 50%;
-            }
-            th, td {
-                border: 1px solid black;
-                padding: 8px 12px;
-                text-align: center;
-            }
-            th {
-                background-color: #f2f2f2;
-            }
-        </style>
     </head>
     <body>
         <h1>Today's Prayer Times</h1>
-        <table>
+        <table border="1">
             <thead>
                 <tr>
                     <th>Prayer</th>
@@ -130,6 +108,5 @@ def index():
     return render_template_string(html_content, prayer_data=zip(prayers, beginning_times, jamaah_times))
 
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
