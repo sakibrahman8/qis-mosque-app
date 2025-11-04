@@ -19,58 +19,92 @@ def get_pdf_url():
 def get_prayer_times():
     # Get the latest PDF URL
     pdf_url = get_pdf_url()
-    
-    # Download the PDF
     response = requests.get(pdf_url)
     
-    # Save the PDF temporarily
-    with open('prayer_times.pdf', 'wb') as f:
-        f.write(response.content)
-
+    # Use in‑memory PDF rather than writing to disk (better for Heroku)
+    import io
+    pdf_file = io.BytesIO(response.content)
+    
     # Open the PDF and extract text
-    with pdfplumber.open('prayer_times.pdf') as pdf:
+    with pdfplumber.open(pdf_file) as pdf:
         page = pdf.pages[0]
         text = page.extract_text()
     
-    # Get today's date
     today = datetime.datetime.now()
     day = today.day
-
-    # Store previous jama'ah times for the case of ""
-    previous_jamaah_times = ['N/A'] * 5
-
-    # Extract today's prayer times
-    beginning_times = []
-    jamaah_times = []
+    
+    previous_jamaah_times = ['N/A'] * 6  # Keep for fallback (6‑slots inc Sunrise slot)
+    beginning_times = None
+    jamaah_times = None
+    
     for line in text.split('\n'):
-        if line.startswith(str(day) + " "):  # Find the line starting with today's date
-            # Split the line into beginning times and jama'ah times using '|'
-            prayer_times = line.split('|')
-            beginning_times = prayer_times[0].split()[2:8]  # Get Fajr to Isha
+        line = line.strip()
+        # Attempt to find a row starting with the day number
+        if line.startswith(f"{day} ") or line.startswith(f"{day}\t") or line.startswith(f"{day} "):
+            # Found the relevant line
+            # Now attempt to split into “beginning” part and “jama’ah” part
+            if '|' in line:
+                parts = line.split('|')
+            else:
+                # fallback: maybe new format uses some other delimiter, try split on double‑space
+                parts = line.split('  ')
             
-            # Process Jama'ah times
-            raw_jamaah_times = prayer_times[1].split()
-            for i, time in enumerate(raw_jamaah_times):
-                if time == '"':
-                    jamaah_times.append(previous_jamaah_times[i])
+            # Beginning times part
+            begin_part = parts[0].split()
+            # Determine the slice for beginning times:
+            # e.g., if format is: Day, (maybe DayName), Fajr, Sunrise, Dhuhr, Asr, Maghrib, Isha
+            # So attempt to drop first 2 items then next 6
+            if len(begin_part) >= 8:
+                beginning_times = begin_part[-6:]  # take the last 6 entries
+            else:
+                beginning_times = begin_part[2:8]  # fallback slice
+            
+            # Jama’ah part (if exists)
+            if len(parts) > 1:
+                raw_jamaah = parts[1].split()
+            else:
+                raw_jamaah = []
+            
+            jamaah_times = []
+            for i in range(6):
+                # For each of Fajr, Sunrise, Dhuhr, Asr, Maghrib, Isha
+                if i < len(raw_jamaah):
+                    t = raw_jamaah[i]
+                    if t in ('"', '—', ''):
+                        jamaah_times.append(previous_jamaah_times[i])
+                    else:
+                        jamaah_times.append(t)
+                        previous_jamaah_times[i] = t
                 else:
-                    jamaah_times.append(time)
-                    previous_jamaah_times[i] = time
+                    jamaah_times.append(previous_jamaah_times[i])
+            
             break
         else:
-            # Update previous_jamaah_times if the row contains times
+            # update previous_jamaah_times from earlier rows if they have valid times
             if '|' in line:
-                _, raw_jamaah_times = line.split('|')
-                for i, time in enumerate(raw_jamaah_times.split()):
-                    if time != '"':
-                        previous_jamaah_times[i] = time
-
-    # Add N/A for sunrise and any missing Jama'ah times
-    if not jamaah_times or len(jamaah_times) < 5:
-        jamaah_times = [jamaah_times[i] if i != 1 else 'N/A' for i in range(5)]  # 'N/A' for Sunrise
-    else:
-        jamaah_times.insert(1, 'N/A')  # Insert 'N/A' for Sunrise
-
+                try:
+                    parts2 = line.split('|')
+                    raw2 = parts2[1].split()
+                    for i, t2 in enumerate(raw2):
+                        if t2 not in ('"', '—', ''):
+                            previous_jamaah_times[i] = t2
+                except:
+                    pass
+    
+    if beginning_times is None or jamaah_times is None:
+        raise ValueError("Could not find today's prayer times in the PDF. Day:", day)
+    
+    # Sunrise slot: Jama’ah time likely not applicable => set to 'N/A'
+    # we assume index 1 corresponds to Sunrise
+    jamaah_times[1] = 'N/A'
+    
+    # Ensure lists have exactly 6 entries
+    if len(beginning_times) != 6:
+        # If it has less, pad or raise
+        beginning_times = (beginning_times + ['N/A']*6)[:6]
+    if len(jamaah_times) != 6:
+        jamaah_times = (jamaah_times + ['N/A']*6)[:6]
+    
     return beginning_times, jamaah_times
 
 @app.route('/')
